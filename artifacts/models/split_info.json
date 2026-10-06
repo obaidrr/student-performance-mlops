@@ -1,0 +1,27 @@
+{
+  "train_size": 5285,
+  "test_size": 1322,
+  "n_features": 19,
+  "feature_columns": [
+    "Hours_Studied",
+    "Attendance",
+    "Sleep_Hours",
+    "Previous_Scores",
+    "Tutoring_Sessions",
+    "Physical_Activity",
+    "Extracurricular_Activities",
+    "Internet_Access",
+    "Learning_Disabilities",
+    "Gender",
+    "School_Type",
+    "Parental_Involvement",
+    "Access_to_Resources",
+    "Motivation_Level",
+    "Family_Income",
+    "Teacher_Quality",
+    "Parental_Education_Level",
+    "Distance_from_Home",
+    "Peer_Influence"
+  ],
+  "target_column": "Exam_Score"
+}

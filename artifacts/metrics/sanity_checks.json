@@ -1,0 +1,12 @@
+{
+  "model_path": "/opt/airflow/artifacts/tuned_models/best_tuned_model.joblib",
+  "n_checks": 10,
+  "all_passed": true,
+  "pass_rate": 1.0,
+  "checks": [
+    {
+      "sample": 949,
+      "actual": 65.0,
+      "predicted": 63.996143866616976,
+      "absolute_error": 1.0038561333830245,
+      "passed": 

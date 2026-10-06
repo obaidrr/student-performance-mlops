@@ -1,0 +1,15 @@
+{
+  "model": "GradientBoosting_tuned",
+  "best_params": {
+    "subsample": 0.9,
+    "n_estimators": 200,
+    "min_samples_split": 10,
+    "min_samples_leaf": 2,
+    "max_depth": 3,
+    "learning_rate": 0.1
+  },
+  "cv_best_score": 0.698734754457113,
+  "rmse": 1.907962087892872,
+  "mae": 0.67550391020794,
+  "r2": 0.7424619268294739
+}

@@ -1,0 +1,50 @@
+{
+  "best_tuned_model": "GradientBoosting",
+  "model_file": "/opt/airflow/artifacts/tuned_models/best_tuned_model.joblib",
+  "metrics": {
+    "model": "GradientBoosting_tuned",
+    "best_params": {
+      "subsample": 0.9,
+      "n_estimators": 200,
+      "min_samples_split": 10,
+      "min_samples_leaf": 2,
+      "max_depth": 3,
+      "learning_rate": 0.1
+    },
+    "cv_best_score": 0.698734754457113,
+    "rmse": 1.907962087892872,
+    "mae": 0.67550391020794,
+    "r2": 0.7424619268294739
+  },
+  "all_tuned_results": {
+    "RandomForest": {
+      "model": "RandomForest_tuned",
+      "best_params": {
+        "n_estimators": 500,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1,
+        "max_features": "log2",
+        "max_depth": null
+      },
+      "cv_best_score": 0.6436275776873289,
+      "rmse": 2.0887470133179473,
+      "mae": 1.033259959657085,
+      "r2": 0.6913447671413695
+    },
+    "GradientBoosting": {
+      "model": "GradientBoosting_tuned",
+      "best_params": {
+        "subsample": 0.9,
+        "n_estimators": 200,
+        "min_samples_split": 10,
+        "min_samples_leaf": 2,
+        "max_depth": 3,
+        "learning_rate": 0.1
+      },
+      "cv_best_score": 0.698734754457113,
+      "rmse": 1.907962087892872,
+      "mae": 0.67550391020794,
+      "r2": 0.7424619268294739
+    }
+  }
+}
