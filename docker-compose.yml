@@ -1,11 +1,10 @@
-
 x-airflow-common: &airflow-common
   build:
     context: ./airflow
     dockerfile: Dockerfile
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:local_postgres_password@postgres/airflow
     AIRFLOW__CORE__FERNET_KEY: ""
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -17,7 +16,7 @@ x-airflow-common: &airflow-common
     MYSQL_PORT: "3306"
     MYSQL_DATABASE: mlops_db
     MYSQL_USER: mlops_user
-    MYSQL_PASSWORD: mlops_password
+    MYSQL_PASSWORD: local_dev_password
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./dataset:/opt/airflow/dataset:ro
@@ -37,7 +36,7 @@ services:
     image: postgres:15
     environment:
       POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
+      POSTGRES_PASSWORD: local_postgres_password
       POSTGRES_DB: airflow
     volumes:
       - postgres-db:/var/lib/postgresql/data
@@ -51,16 +50,16 @@ services:
   mysql:
     image: mysql:8.0
     environment:
-      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_ROOT_PASSWORD: local_root_password
       MYSQL_DATABASE: mlops_db
       MYSQL_USER: mlops_user
-      MYSQL_PASSWORD: mlops_password
+      MYSQL_PASSWORD: local_dev_password
     volumes:
       - mysql-db:/var/lib/mysql
     ports:
       - "3307:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "mlops_user", "-pmlops_password"]
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u mlops_user -plocal_dev_password"]
       interval: 10s
       retries: 5
       start_period: 20s

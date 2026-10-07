@@ -1,512 +1,172 @@
-================================================================================
-PROJECT CONTEXT: Student Performance ML Pipeline
-================================================================================
+x-airflow-common: &airflow-common
+  build:
+    context: ./airflow
+    dockerfile: Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:local_postgres_password@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ""
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    AIRFLOW__WEBSERVER__WORKERS: "2"
+    AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: "120"
+    MYSQL_HOST: mysql
+    MYSQL_PORT: "3306"
+    MYSQL_DATABASE: mlops_db
+    MYSQL_USER: mlops_user
+    MYSQL_PASSWORD: local_dev_password
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./dataset:/opt/airflow/dataset:ro
+    - ./artifacts:/opt/airflow/artifacts
+    - airflow-logs:/opt/airflow/logs
+    - airflow-plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    mysql:
+      condition: service_healthy
 
-PROJECT OVERVIEW
-----------------
-This is an end-to-end MLOps pipeline that predicts student exam scores based on
-19 input features. The system is built using Apache Airflow for orchestration,
-scikit-learn for machine learning, FastAPI for the REST API, React for the
-frontend, MySQL for data storage, and Docker Compose for containerization.
+services:
+  # ─── Infrastructure ────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: local_postgres_password
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
 
-Dataset: StudentPerformanceFactors.csv
-  - Source: dataset/raw/StudentPerformanceFactors.csv
-  - Rows: 6,607 student records
-  - Features: 19 (6 numeric, 13 categorical)
-  - Target: Exam_Score (continuous, 0-100) — regression problem
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: local_root_password
+      MYSQL_DATABASE: mlops_db
+      MYSQL_USER: mlops_user
+      MYSQL_PASSWORD: local_dev_password
+    volumes:
+      - mysql-db:/var/lib/mysql
+    ports:
+      - "3307:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u mlops_user -plocal_dev_password"]
+      interval: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
 
-================================================================================
-DATASET DETAILS
-================================================================================
+  # ─── Airflow ───────────────────────────────────────────────────────────────
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        export PATH=$PATH:/home/airflow/.local/bin
+        export PYTHONPATH=/home/airflow/.local/lib/python3.11/site-packages
+        mkdir -p /opt/airflow/logs /opt/airflow/dags /opt/airflow/plugins /opt/airflow/artifacts
+        mkdir -p /opt/airflow/artifacts/preprocessing
+        mkdir -p /opt/airflow/artifacts/models
+        mkdir -p /opt/airflow/artifacts/tuned_models
+        mkdir -p /opt/airflow/artifacts/final_models
+        mkdir -p /opt/airflow/artifacts/metrics
+        mkdir -p /opt/airflow/logs/scheduler
+        chown -R 50000:0 /opt/airflow/artifacts
+        chown -R 50000:0 /opt/airflow/logs
+        airflow db init
+        airflow users create \
+          --username admin \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@mlops.local \
+          --password admin || true
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_UPGRADE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+    user: "0:0"
 
-Numeric Features:
-  - Hours_Studied: Hours studied per day (0-24)
-  - Attendance: Attendance percentage (0-100)
-  - Sleep_Hours: Hours of sleep per day (0-24)
-  - Previous_Scores: Previous exam scores (0-100)
-  - Tutoring_Sessions: Number of tutoring sessions per week (0+)
-  - Physical_Activity: Hours of physical activity per week (0+)
+  airflow-webserver:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        rm -f /opt/airflow/airflow-webserver.pid
+        exec /usr/bin/dumb-init -- /entrypoint webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
 
-Ordinal Categorical Features (encoded with OrdinalEncoder):
-  - Parental_Involvement: [Low, Medium, High]
-  - Access_to_Resources: [Low, Medium, High]
-  - Motivation_Level: [Low, Medium, High]
-  - Family_Income: [Low, Medium, High]
-  - Teacher_Quality: [Low, Medium, High]
-  - Parental_Education_Level: [High School, College, Postgraduate]
-  - Distance_from_Home: [Near, Moderate, Far]
-  - Peer_Influence: [Negative, Neutral, Positive]
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
 
-Binary Categorical Features (encoded with LabelEncoder):
-  - Extracurricular_Activities: [Yes, No]
-  - Internet_Access: [Yes, No]
-  - Learning_Disabilities: [Yes, No]
-  - Gender: [Male, Female]
-  - School_Type: [Public, Private]
+  # ─── ML API Server ─────────────────────────────────────────────────────────
+  api-server:
+    build:
+      context: ./api-server
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      ARTIFACTS_DIR: /artifacts
+    volumes:
+      - ./artifacts:/artifacts:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
 
-Target Variable:
-  - Exam_Score: Continuous numeric value (0-100)
-  - Problem Type: Regression
+  # ─── React Frontend ────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      api-server:
+        condition: service_healthy
+    restart: unless-stopped
 
-================================================================================
-DIRECTORY STRUCTURE
-================================================================================
-
-mlops/
-├── airflow/
-│   ├── dags/
-│   │   ├── dataset_preprocessor_and_csv_to_mysql_dag.py  (DAG 01)
-│   │   ├── model_selector_dag.py                         (DAG 02)
-│   │   ├── model_training_dag.py                         (DAG 03)
-│   │   ├── model_tunner_dag.py                           (DAG 04)
-│   │   ├── model_tester_dag.py                           (DAG 05)
-│   │   └── model_extractor_dag.py                        (DAG 06)
-│   ├── Dockerfile
-│   └── requirements.txt
-├── api-server/
-│   ├── app.py                    (FastAPI application)
-│   ├── Dockerfile
-│   └── requirements.txt
-├── frontend/
-│   ├── src/
-│   │   ├── main.jsx
-│   │   ├── index.css
-│   │   ├── App.jsx               (Router + Navbar)
-│   │   └── pages/
-│   │       ├── Landing.jsx       (Home page with pipeline overview)
-│   │       ├── Prediction.jsx    (Prediction form + result gauge)
-│   │       └── ModelPerformance.jsx  (Charts and metrics tables)
-│   ├── index.html
-│   ├── package.json
-│   ├── vite.config.js
-│   ├── nginx.conf
-│   └── Dockerfile
-├── dataset/
-│   └── raw/
-│       └── StudentPerformanceFactors.csv
-├── artifacts/                    (Generated by pipeline)
-│   ├── preprocessing/
-│   │   ├── preprocessed_data.csv
-│   │   ├── data_from_db.csv
-│   │   ├── numerical_scaler.joblib
-│   │   ├── ordinal_encoders.joblib
-│   │   ├── label_encoders.joblib
-│   │   └── metadata.json
-│   ├── models/
-│   │   ├── X_train.npy
-│   │   ├── X_test.npy
-│   │   ├── y_train.npy
-│   │   ├── y_test.npy
-│   │   ├── split_info.json
-│   │   ├── training_results.json
-│   │   ├── baseline_results.json
-│   │   ├── LinearRegression_baseline.joblib
-│   │   ├── LinearRegression_trained.joblib  (if in top 3)
-│   │   ├── Ridge_trained.joblib             (if in top 3)
-│   │   ├── RandomForest_trained.joblib      (if in top 3)
-│   │   └── GradientBoosting_trained.joblib  (if in top 3)
-│   ├── tuned_models/
-│   │   ├── RandomForest_tuned.joblib
-│   │   ├── GradientBoosting_tuned.joblib
-│   │   ├── best_tuned_model.joblib
-│   │   ├── best_tuned_model_info.json
-│   │   ├── RandomForest_tuning_results.json
-│   │   └── GradientBoosting_tuning_results.json
-│   ├── final_models/
-│   │   └── (copies of all trained/tuned models)
-│   ├── metrics/
-│   │   ├── trained_models_metrics.json
-│   │   ├── tuned_models_metrics.json
-│   │   ├── sanity_checks.json
-│   │   └── final_metrics_report.json
-│   ├── model_comparison.json
-│   ├── model_metrics.json
-│   ├── champion_model.joblib
-│   ├── champion_model_info.json
-│   └── manifest.json
-├── docker-compose.yml
-├── project-context.txt
-└── task.md
-
-================================================================================
-AIRFLOW DAGs (ML PIPELINE)
-================================================================================
-
-DAG 01: dataset_preprocessor_and_csv_to_mysql_dag.py
-  DAG ID: 01_dataset_preprocessor_and_csv_to_mysql
-  Purpose: Load, preprocess, and store data in MySQL
-  Tasks:
-    1. load_and_validate_dataset
-       - Reads CSV from /opt/airflow/dataset/raw/StudentPerformanceFactors.csv
-       - Validates schema and reports missing values
-    2. preprocess_and_save_artifacts
-       - Fills missing values (median for numeric, mode for categorical)
-       - Applies OrdinalEncoder to ordinal categorical columns
-       - Applies LabelEncoder to binary categorical columns
-       - Applies StandardScaler to numeric features
-       - Saves encoders and scaler as .joblib files to artifacts/preprocessing/
-       - Saves metadata.json with feature names and column info
-       - Saves preprocessed_data.csv
-    3. store_to_mysql
-       - Stores preprocessed data to MySQL table: student_performance
-       - Also stores raw data to MySQL table: student_performance_raw
-       - Uses SQLAlchemy + pymysql
-
-DAG 02: model_selector_dag.py
-  DAG ID: 02_model_selector
-  Purpose: Benchmark candidate regression models
-  Tasks:
-    1. load_data_from_mysql
-       - Reads preprocessed data from MySQL
-       - Saves to artifacts/preprocessing/data_from_db.csv
-    2. evaluate_candidate_models
-       - Tests 8 models: LinearRegression, Ridge, Lasso, ElasticNet,
-         DecisionTree, RandomForest, GradientBoosting, ExtraTrees
-       - Uses 5-fold cross-validation
-       - Metrics: RMSE, MAE, R², CV-R² (mean ± std)
-       - Saves results to artifacts/model_comparison.json
-       - Selects top-3 models based on R² score
-    3. summarize_model_selection
-       - Prints ranking summary
-
-DAG 03: model_training_dag.py
-  DAG ID: 03_model_training
-  Purpose: Train top-performing models on full training set
-  Tasks:
-    1. prepare_train_test_split
-       - 80/20 train-test split (random_state=42)
-       - Saves X_train, X_test, y_train, y_test as .npy files
-       - Saves split_info.json
-    2. train_baseline_model
-       - Trains LinearRegression as baseline
-       - Saves LinearRegression_baseline.joblib
-    3. train_best_models
-       - Trains top-3 models from model_comparison.json
-       - Available registry: LinearRegression, Ridge, RandomForest (200 trees),
-         GradientBoosting (200 estimators)
-       - Saves each model as {ModelName}_trained.joblib
-       - Saves training_results.json
-
-DAG 04: model_tunner_dag.py
-  DAG ID: 04_model_tuner
-  Purpose: Hyperparameter optimization for RandomForest and GradientBoosting
-  Tasks:
-    1. tune_random_forest (parallel)
-       - RandomizedSearchCV (20 iterations, 5-fold CV)
-       - Search space: n_estimators, max_depth, min_samples_split,
-         min_samples_leaf, max_features
-       - Saves RandomForest_tuned.joblib and tuning JSON
-    2. tune_gradient_boosting (parallel)
-       - RandomizedSearchCV (20 iterations, 5-fold CV)
-       - Search space: n_estimators, learning_rate, max_depth,
-         min_samples_split, min_samples_leaf, subsample
-       - Saves GradientBoosting_tuned.joblib and tuning JSON
-    3. select_best_tuned_model
-       - Compares R² of both tuned models
-       - Copies the winner as best_tuned_model.joblib
-       - Saves best_tuned_model_info.json
-
-DAG 05: model_tester_dag.py
-  DAG ID: 05_model_tester
-  Purpose: Comprehensive evaluation and sanity testing
-  Tasks:
-    1. evaluate_trained_models (parallel)
-       - Evaluates all *_trained.joblib and *_baseline.joblib models
-       - Metrics: RMSE, MAE, R², explained variance, max error, mean error
-       - Saves trained_models_metrics.json
-    2. evaluate_tuned_models (parallel)
-       - Evaluates all *_tuned.joblib models
-       - Same metrics as above
-       - Saves tuned_models_metrics.json
-    3. run_prediction_sanity_checks
-       - Picks 10 random samples from test set
-       - Checks if absolute error < 20 score points
-       - Reports pass rate
-       - Saves sanity_checks.json
-    4. generate_final_metrics_report
-       - Aggregates all metrics
-       - Identifies champion model (highest R²)
-       - Saves final_metrics_report.json
-       - Saves model_metrics.json to artifacts root (consumed by API)
-
-DAG 06: model_extractor_dag.py
-  DAG ID: 06_model_extractor
-  Purpose: Extract all model files and catalog artifacts
-  Tasks:
-    1. extract_all_models
-       - Copies all .joblib files to artifacts/final_models/
-       - Logs extraction in extraction_log.json
-    2. identify_champion_model
-       - Uses model_metrics.json to find the champion model
-       - Copies champion to artifacts/champion_model.joblib
-       - Saves champion_model_info.json
-    3. generate_artifacts_manifest
-       - Catalogs all .joblib and .json files in artifacts/
-       - Computes MD5 checksums
-       - Saves manifest.json
-
-================================================================================
-FASTAPI SERVER (api-server/app.py)
-================================================================================
-
-Base URL: http://localhost:8000
-Technology: FastAPI + Uvicorn
-
-Endpoints:
-  GET  /          - Service info and available endpoints
-  GET  /health    - Health check (model_loaded, scaler_loaded status)
-  POST /predict   - Predict exam score for a student
-  GET  /models    - List all available model files
-  GET  /model-performance      - Champion model metrics + all model metrics
-  GET  /model-performance/comparison  - Model selection phase benchmarks
-  POST /reload-model  - Reload model artifacts from disk
-
-/predict Request Body (JSON):
-  {
-    "hours_studied": 6.0,
-    "attendance": 85.0,
-    "parental_involvement": "Medium",
-    "access_to_resources": "High",
-    "extracurricular_activities": "Yes",
-    "sleep_hours": 7.0,
-    "previous_scores": 75.0,
-    "motivation_level": "High",
-    "internet_access": "Yes",
-    "tutoring_sessions": 2,
-    "family_income": "Medium",
-    "teacher_quality": "High",
-    "school_type": "Public",
-    "peer_influence": "Positive",
-    "physical_activity": 3,
-    "learning_disabilities": "No",
-    "parental_education_level": "College",
-    "distance_from_home": "Near",
-    "gender": "Male"
-  }
-
-/predict Response:
-  {
-    "predicted_exam_score": 72.45,
-    "model_used": "GradientBoostingRegressor",
-    "confidence_note": "Prediction based on trained regression model"
-  }
-
-Model Loading:
-  - On startup, loads champion_model.joblib from /artifacts/
-  - Also loads preprocessing artifacts (scaler, encoders)
-  - Falls back to any available tuned/trained model if champion not found
-
-CORS: Enabled for all origins (suitable for development)
-
-================================================================================
-REACT FRONTEND (frontend/)
-================================================================================
-
-Technology: React 18 + Vite + React Router v6 + Recharts + Axios
-Build: Multi-stage Docker (Vite build → Nginx serve)
-
-Pages:
-  1. Landing Page (/)
-     - Hero section with project description
-     - Statistics row (6607 samples, 19 features, 8 models, 6 DAGs)
-     - Pipeline overview (6 steps with descriptions)
-     - Features section (6 feature cards)
-     - CTA section
-
-  2. Prediction Page (/predict)
-     - Form with all 19 input fields
-       - 6 numeric inputs with min/max/step validation
-       - 13 select dropdowns for categorical features
-     - Animated SVG gauge showing predicted score
-     - Color-coded result (green=Excellent, yellow=Good, red=Below Average)
-     - Reset button
-     - Error handling with helpful messages
-
-  3. Model Performance Page (/performance)
-     - Champion model metrics cards (R², RMSE, MAE, Explained Variance, Max Error)
-     - R² Score bar chart (all models comparison)
-     - RMSE & MAE bar chart
-     - Radar chart for champion model
-     - Full metrics table (sortable by R²)
-     - Model selection phase benchmarks table with CV scores
-
-Environment Variables:
-  VITE_API_URL: API base URL (defaults to /api for proxy)
-
-================================================================================
-DOCKER COMPOSE SERVICES
-================================================================================
-
-Services:
-  1. postgres (postgres:15)
-     - Airflow metadata database
-     - Internal only (no external port)
-
-  2. mysql (mysql:8.0)
-     - ML data storage
-     - External port: 3307 (maps to 3306 internally)
-     - Credentials: mlops_user / mlops_password / mlops_db
-
-  3. airflow-init
-     - One-time initialization: DB setup + admin user creation
-     - Creates artifact directories
-     - Admin: admin / admin
-
-  4. airflow-webserver
-     - Airflow UI: http://localhost:8080
-     - Login: admin / admin
-
-  5. airflow-scheduler
-     - Triggers DAG runs
-
-  6. api-server
-     - FastAPI prediction API: http://localhost:8000
-     - Mounts artifacts/ as read-only volume
-
-  7. frontend
-     - React UI: http://localhost:3000
-     - Nginx reverse proxy routes /api/* to api-server
-
-Shared Volumes:
-  - ./airflow/dags → /opt/airflow/dags (DAG files)
-  - ./dataset → /opt/airflow/dataset (read-only dataset)
-  - ./artifacts → /opt/airflow/artifacts (shared ML artifacts)
-  - ./artifacts → /artifacts (read-only for API server)
-
-================================================================================
-HOW TO RUN
-================================================================================
-
-Prerequisites:
-  - Docker and Docker Compose installed
-  - At least 4GB RAM available
-
-Start all services:
-  docker compose up -d
-
-Initialize (first time only — waits for airflow-init to complete):
-  docker compose up airflow-init
-
-Access services:
-  - Airflow UI:     http://localhost:8080  (admin / admin)
-  - FastAPI Docs:   http://localhost:8000/docs
-  - React Frontend: http://localhost:3000
-  - MySQL:          localhost:3307
-
-Run the ML pipeline (in order):
-  1. In Airflow UI, trigger: 01_dataset_preprocessor_and_csv_to_mysql
-  2. After success, trigger: 02_model_selector
-  3. After success, trigger: 03_model_training
-  4. After success, trigger: 04_model_tuner
-  5. After success, trigger: 05_model_tester
-  6. After success, trigger: 06_model_extractor
-
-After the pipeline completes:
-  - champion_model.joblib will be in artifacts/
-  - The API server will load it automatically (or POST /reload-model)
-  - The frontend will display predictions and performance metrics
-
-Stop all services:
-  docker compose down
-
-Stop and remove volumes (full reset):
-  docker compose down -v
-
-================================================================================
-PREPROCESSING PIPELINE DETAILS
-================================================================================
-
-Input Features (feature_columns in metadata.json):
-  [Hours_Studied, Attendance, Sleep_Hours, Previous_Scores,
-   Tutoring_Sessions, Physical_Activity,
-   Extracurricular_Activities, Internet_Access, Learning_Disabilities,
-   Gender, School_Type,
-   Parental_Involvement, Access_to_Resources, Motivation_Level,
-   Family_Income, Teacher_Quality, Parental_Education_Level,
-   Distance_from_Home, Peer_Influence]
-
-Total: 19 features
-
-Preprocessing Steps Applied:
-  1. Missing value imputation (median for numeric, mode for categorical)
-  2. OrdinalEncoder for 8 ordinal categorical features
-  3. LabelEncoder for 5 binary categorical features
-  4. StandardScaler for 6 numeric features
-
-Saved Artifacts:
-  - numerical_scaler.joblib: StandardScaler fitted on training data
-  - ordinal_encoders.joblib: Dict of OrdinalEncoder per ordinal column
-  - label_encoders.joblib: Dict of LabelEncoder per binary column
-  - metadata.json: Feature names, column types, dataset stats
-
-================================================================================
-MODEL DETAILS
-================================================================================
-
-Candidate Models (DAG 02):
-  - LinearRegression
-  - Ridge (alpha=1.0)
-  - Lasso (alpha=0.1)
-  - ElasticNet (alpha=0.1, l1_ratio=0.5)
-  - DecisionTree (max_depth=10)
-  - RandomForest (n_estimators=100)
-  - GradientBoosting (n_estimators=100)
-  - ExtraTrees (n_estimators=100)
-
-Trained Models (DAG 03):
-  - LinearRegression (baseline)
-  - Top-3 from model selection with more estimators (200 for ensembles)
-
-Tuned Models (DAG 04):
-  - RandomForest: 20-iteration RandomizedSearchCV over depth, estimators, splits
-  - GradientBoosting: 20-iteration RandomizedSearchCV over lr, depth, subsample
-
-Evaluation Metrics:
-  - R² Score: Coefficient of determination (higher = better, max 1.0)
-  - RMSE: Root Mean Squared Error (lower = better)
-  - MAE: Mean Absolute Error (lower = better)
-  - Explained Variance: Fraction of variance explained (higher = better)
-  - Max Error: Largest single prediction error
-  - Mean Error: Average signed error (bias indicator)
-
-Train/Test Split: 80% train / 20% test (random_state=42)
-Cross-validation: 5-fold CV used in selection and tuning phases
-
-================================================================================
-TECHNOLOGY STACK
-================================================================================
-
-Orchestration:  Apache Airflow 2.8.1
-ML Framework:   scikit-learn 1.4.2
-Data Handling:  pandas 2.2.1, numpy 1.26.4
-Serialization:  joblib 1.3.2
-Database:       MySQL 8.0 (data), PostgreSQL 15 (Airflow metadata)
-ORM:            SQLAlchemy 2.0 + pymysql
-API Framework:  FastAPI 0.110.0 + Uvicorn 0.29.0
-Data Validation:Pydantic v2
-Frontend:       React 18 + React Router 6 + Recharts + Axios + Vite
-Containerization: Docker + Docker Compose
-Web Server:     Nginx 1.25 (frontend)
-Python Version: 3.11
-
-================================================================================
-NOTES
-================================================================================
-
-- The artifacts/ directory is shared between Airflow workers and the API server
-  via a Docker volume mount. This enables zero-copy model serving.
-- The API server loads the model on startup and provides a /reload-model
-  endpoint to refresh without restart after pipeline re-runs.
-- The React frontend uses a Vite dev proxy (/api → api-server:8000) in
-  development and an Nginx proxy in production.
-- DAGs are triggered manually (schedule_interval=None). For production, they
-  can be set to a cron schedule or chained using TriggerDagRunOperator.
-- All Airflow tasks use PythonOperator for portability. No external connections
-  (Airflow Connections) are required — MySQL credentials are passed as
-  environment variables.
-- The sanity check threshold of 20 score points can be adjusted in
-  model_tester_dag.py.
-
-================================================================================
-END OF PROJECT CONTEXT
-================================================================================
+volumes:
+  postgres-db:
+  mysql-db:
+  airflow-logs:
+  airflow-plugins:
